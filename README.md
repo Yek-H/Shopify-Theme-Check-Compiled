@@ -1,4 +1,6 @@
-# Shopify Theme Check — Auto-Updating Build Repository
+# Shopify Theme Check Compiled
+
+A clean, automated build of https://github.com/Shopify/theme-tools.
 
 This repository is dedicated to producing a clean, reproducible and automatically updated local build of the official [Shopify Theme Tools](https://github.com/Shopify/theme-tools) monorepo.
 
