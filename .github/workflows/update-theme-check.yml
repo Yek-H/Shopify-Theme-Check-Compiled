@@ -1,0 +1,290 @@
+name: Update Shopify Theme Check Environment
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even when Theme Check and Liquid docs are unchanged"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shopify-theme-check-updater
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      NODE_VERSION: "22"
+
+    steps:
+      - name: Checkout updater repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Detect latest upstream state
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          THEME_CHECK_VERSION="$(npm view @shopify/theme-check-node version)"
+          THEME_TOOLS_TAG="@shopify/theme-check-node@${THEME_CHECK_VERSION}"
+          LIQUID_DOCS_SHA="$(git ls-remote https://github.com/Shopify/theme-liquid-docs.git refs/heads/main | awk '{print $1}')"
+
+          CURRENT_VERSION="$(jq -r '.theme_check_version // ""' state/current.json)"
+          CURRENT_DOCS_SHA="$(jq -r '.liquid_docs_sha // ""' state/current.json)"
+
+          FORCE="false"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            FORCE="${{ inputs.force }}"
+          fi
+
+          CHANGED="false"
+          if [[ "$FORCE" == "true" || "$THEME_CHECK_VERSION" != "$CURRENT_VERSION" || "$LIQUID_DOCS_SHA" != "$CURRENT_DOCS_SHA" ]]; then
+            CHANGED="true"
+          fi
+
+          {
+            echo "theme_check_version=$THEME_CHECK_VERSION"
+            echo "theme_tools_tag=$THEME_TOOLS_TAG"
+            echo "liquid_docs_sha=$LIQUID_DOCS_SHA"
+            echo "changed=$CHANGED"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Theme Check: $THEME_CHECK_VERSION"
+          echo "Liquid docs: $LIQUID_DOCS_SHA"
+          echo "Build required: $CHANGED"
+
+      - name: Stop when upstream is unchanged
+        if: steps.upstream.outputs.changed != 'true'
+        run: echo "No upstream changes detected. Nothing to build."
+
+      - name: Configure GitHub HTTPS submodules
+        if: steps.upstream.outputs.changed == 'true'
+        run: git config --global url."https://github.com/".insteadOf git@github.com:
+
+      - name: Clone official Theme Tools release
+        if: steps.upstream.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone             --depth 1             --branch "${{ steps.upstream.outputs.theme_tools_tag }}"             --recurse-submodules             https://github.com/Shopify/theme-tools.git             upstream/theme-tools
+
+      - name: Clone exact Shopify Liquid documentation snapshot
+        if: steps.upstream.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/Shopify/theme-liquid-docs.git upstream/theme-liquid-docs
+          git -C upstream/theme-liquid-docs checkout "${{ steps.upstream.outputs.liquid_docs_sha }}"
+
+      - name: Install exact pnpm version declared by Theme Tools
+        if: steps.upstream.outputs.changed == 'true'
+        id: pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_MANAGER="$(node -p "require('./upstream/theme-tools/package.json').packageManager")"
+          PNPM_VERSION="${PACKAGE_MANAGER#pnpm@}"
+          npm install --global "pnpm@${PNPM_VERSION}"
+          echo "version=$PNPM_VERSION" >> "$GITHUB_OUTPUT"
+          pnpm --version
+
+      - name: Install exact lockfile dependencies
+        if: steps.upstream.outputs.changed == 'true'
+        working-directory: upstream/theme-tools
+        env:
+          SHOPIFY_TLD_ROOT: ${{ github.workspace }}/upstream/theme-liquid-docs
+        run: pnpm install --frozen-lockfile
+
+      - name: Build complete Theme Tools monorepo
+        if: steps.upstream.outputs.changed == 'true'
+        working-directory: upstream/theme-tools
+        env:
+          SHOPIFY_TLD_ROOT: ${{ github.workspace }}/upstream/theme-liquid-docs
+        run: pnpm build
+
+      - name: Type check
+        if: steps.upstream.outputs.changed == 'true'
+        working-directory: upstream/theme-tools
+        env:
+          SHOPIFY_TLD_ROOT: ${{ github.workspace }}/upstream/theme-liquid-docs
+        run: pnpm type-check
+
+      - name: Unit tests
+        if: steps.upstream.outputs.changed == 'true'
+        working-directory: upstream/theme-tools
+        env:
+          SHOPIFY_TLD_ROOT: ${{ github.workspace }}/upstream/theme-liquid-docs
+        run: pnpm exec vitest run
+
+      - name: Format check
+        if: steps.upstream.outputs.changed == 'true'
+        working-directory: upstream/theme-tools
+        run: pnpm format:check
+
+      - name: Verify critical compiled outputs
+        if: steps.upstream.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f upstream/theme-tools/packages/theme-check-node/dist/cli.js
+          test -f upstream/theme-tools/packages/vscode-extension/dist/node/extension.js
+          test -f upstream/theme-tools/packages/vscode-extension/syntaxes/package.json
+
+      - name: Theme Check smoke test
+        if: steps.upstream.outputs.changed == 'true'
+        shell: bash
+        env:
+          SHOPIFY_TLD_ROOT: ${{ github.workspace }}/upstream/theme-liquid-docs
+        run: |
+          set -euo pipefail
+          THEME="$RUNNER_TEMP/smoke-theme"
+          mkdir -p "$THEME"/{layout,sections,templates,assets,config,locales,snippets}
+
+          cat > "$THEME/layout/theme.liquid" <<'EOF'
+          <!doctype html>
+          <html>
+            <head>{{ content_for_header }}</head>
+            <body>{{ content_for_layout }}</body>
+          </html>
+          EOF
+
+          cat > "$THEME/sections/main-test.liquid" <<'EOF'
+          <section>{{ section.settings.heading }}</section>
+          {% schema %}
+          {"name":"Test","settings":[{"type":"text","id":"heading","label":"Heading"}],"presets":[{"name":"Test"}]}
+          {% endschema %}
+          EOF
+
+          cat > "$THEME/templates/index.json" <<'EOF'
+          {"sections":{"main":{"type":"main-test"}},"order":["main"]}
+          EOF
+
+          cat > "$THEME/config/settings_schema.json" <<'EOF'
+          [{"name":"theme_info","theme_name":"CI Smoke Test","theme_version":"1.0.0","theme_author":"Theme Check Updater","theme_documentation_url":"https://github.com/Shopify/theme-tools","theme_support_url":"https://github.com/Shopify/theme-tools/issues"}]
+          EOF
+
+          echo '{"current":{}}' > "$THEME/config/settings_data.json"
+          echo '{}' > "$THEME/locales/en.default.json"
+
+          pnpm --dir upstream/theme-tools theme-check "$THEME"
+
+      - name: Record build provenance
+        if: steps.upstream.outputs.changed == 'true'
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          THEME_TOOLS_SHA="$(git -C upstream/theme-tools rev-parse HEAD)"
+          LIQUID_GRAMMAR_SHA="$(git -C upstream/theme-tools submodule status packages/vscode-extension/syntaxes | awk '{print $1}' | sed 's/^[+-]//')"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DOCS_SHORT="${{ steps.upstream.outputs.liquid_docs_sha }}"
+          DOCS_SHORT="${DOCS_SHORT:0:7}"
+          RELEASE_TAG="theme-check-v${{ steps.upstream.outputs.theme_check_version }}-docs-${DOCS_SHORT}"
+
+          jq -n             --arg theme_check_version "${{ steps.upstream.outputs.theme_check_version }}"             --arg theme_tools_tag "${{ steps.upstream.outputs.theme_tools_tag }}"             --arg theme_tools_sha "$THEME_TOOLS_SHA"             --arg liquid_docs_sha "${{ steps.upstream.outputs.liquid_docs_sha }}"             --arg liquid_grammar_sha "$LIQUID_GRAMMAR_SHA"             --arg node_version "$(node --version)"             --arg pnpm_version "${{ steps.pnpm.outputs.version }}"             --arg built_at "$BUILT_AT"             --arg os "ubuntu-24.04"             --arg arch "linux-x64"             '{
+              theme_check_version: $theme_check_version,
+              theme_tools_tag: $theme_tools_tag,
+              theme_tools_sha: $theme_tools_sha,
+              liquid_docs_sha: $liquid_docs_sha,
+              liquid_grammar_sha: $liquid_grammar_sha,
+              node_version: $node_version,
+              pnpm_version: $pnpm_version,
+              built_at: $built_at,
+              os: $os,
+              arch: $arch
+            }' > BUILD_METADATA.json
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create portable bundle
+        if: steps.upstream.outputs.changed == 'true'
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.upstream.outputs.theme_check_version }}"
+          BUNDLE="Shopify-theme-tools-${VERSION}-linux-x64-node22.tar.gz"
+          STAGE="$RUNNER_TEMP/shopify-theme-tools-portable"
+
+          mkdir -p "$STAGE"
+          cp -a upstream/theme-tools "$STAGE/theme-tools"
+          cp -a upstream/theme-liquid-docs "$STAGE/theme-liquid-docs"
+          cp BUILD_METADATA.json "$STAGE/BUILD_METADATA.json"
+
+          rm -rf "$STAGE/theme-tools/.git" "$STAGE/theme-liquid-docs/.git"
+          find "$STAGE/theme-tools" -type d -name .git -prune -exec rm -rf {} +
+
+          cat > "$STAGE/theme-check-local" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export SHOPIFY_TLD_ROOT="$ROOT/theme-liquid-docs"
+          exec pnpm --dir "$ROOT/theme-tools" theme-check "$@"
+          EOF
+          chmod +x "$STAGE/theme-check-local"
+
+          tar -C "$STAGE" -czf "$BUNDLE" .
+          sha256sum "$BUNDLE" > "$BUNDLE.sha256"
+
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+          echo "checksum=$BUNDLE.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable GitHub Release
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.metadata.outputs.release_tag }}"
+          BUNDLE="${{ steps.bundle.outputs.bundle }}"
+          CHECKSUM="${{ steps.bundle.outputs.checksum }}"
+
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "# Shopify Theme Check ${{ steps.upstream.outputs.theme_check_version }}"
+            echo
+            echo "Clean Linux x64 / Node 22 build of the official Shopify Theme Tools monorepo."
+            echo
+            echo "- Theme Check: \`${{ steps.upstream.outputs.theme_check_version }}\`"
+            echo "- Liquid docs: \`${{ steps.upstream.outputs.liquid_docs_sha }}\`"
+            echo "- pnpm: \`${{ steps.pnpm.outputs.version }}\`"
+            echo
+            echo "The archive includes the exact Liquid documentation snapshot and a \`theme-check-local\` wrapper for offline execution."
+          } > "$NOTES"
+
+          gh release create "$TAG"             "$BUNDLE"             "$CHECKSUM"             BUILD_METADATA.json             --repo "${{ github.repository }}"             --target main             --title "Shopify Theme Check ${{ steps.upstream.outputs.theme_check_version }} · Liquid docs ${{ steps.upstream.outputs.liquid_docs_sha }}"             --notes-file "$NOTES"             --latest
+
+      - name: Update successful-build state
+        if: steps.upstream.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp BUILD_METADATA.json state/current.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/current.json
+          git commit -m "chore: record Theme Check ${{ steps.upstream.outputs.theme_check_version }} build" || exit 0
+          git push origin HEAD:main
