@@ -27,8 +27,8 @@ The GitHub Actions build:
 8. Runs type checking, unit tests and format validation.
 9. Runs a real Theme Check smoke test against a minimal Shopify theme.
 10. Packages Theme Tools, its installed dependencies, compiled outputs and the exact Liquid docs snapshot.
-11. Publishes a GitHub Release with SHA-256 checksums and provenance metadata.
-12. Updates `state/current.json` only after a successful validated build.
+11. Publishes both a GitHub Actions artifact and a permanent GitHub Release with SHA-256 checksums and provenance metadata.
+12. Uses the release tag itself as the update state; if the same Theme Check version and Liquid docs commit are already published, the scheduled run skips rebuilding.
 
 The runner is pinned to **Ubuntu 24.04 / Linux x64** and uses **Node.js 22**. Browser downloads are skipped because they are not required for the Theme Check build.
 
