@@ -4,8 +4,6 @@ A clean, automated build of https://github.com/Shopify/theme-tools.
 
 This repository is dedicated to producing a clean, reproducible and automatically updated local build of the official [Shopify Theme Tools](https://github.com/Shopify/theme-tools) monorepo.
 
-It no longer contains the previous MangaFans project files.
-
 ## What it tracks
 
 The updater monitors two independent upstream sources:
