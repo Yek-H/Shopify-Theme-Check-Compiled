@@ -75,7 +75,8 @@ jobs:
 
       - name: Configure HTTPS for Shopify submodules
         if: ${{ steps.detect.outputs.build == 'true' }}
-        run: git config --global url."https://github.com/".insteadOf git@github.com:
+        run: |
+          git config --global url."https://github.com/".insteadOf git@github.com:
 
       - name: Clone official Theme Tools release
         if: ${{ steps.detect.outputs.build == 'true' }}
@@ -247,11 +248,11 @@ jobs:
             echo
             echo "Clean Ubuntu 24.04 / Linux x64 / Node 22 build of Shopify Theme Tools."
             echo
-            echo "- Theme Check: `$VERSION`"
-            echo "- Liquid docs: `$DOCS_SHA`"
-            echo "- pnpm: `${{ steps.pnpm.outputs.version }}`"
+            printf -- '- Theme Check: `%s`\n' "$VERSION"
+            printf -- '- Liquid docs: `%s`\n' "$DOCS_SHA"
+            printf -- '- pnpm: `%s`\n' "${{ steps.pnpm.outputs.version }}"
             echo
-            echo "The archive includes the exact Liquid docs snapshot and an offline-friendly `theme-check-local` wrapper."
+            echo 'The archive includes the exact Liquid docs snapshot and an offline-friendly `theme-check-local` wrapper.'
           } > "$NOTES"
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
